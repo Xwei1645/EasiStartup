@@ -12,11 +12,21 @@
   "app": {
     "windows": [
       {
-        "title": "easistartup",
+        "label": "startup-editor",
+        "title": "启动项编辑",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "应用设置",
+        "width": 800,
+        "height": 600,
+        "visible": false
       }
     ],
+
     "security": {
       "csp": null
     }
