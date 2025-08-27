@@ -187,12 +187,20 @@ fn set_admin_startup(enabled: bool) -> Result<(), String> {
 "#, exe_path);
         
         // 使用schtasks命令创建任务
-        let output = Command::new("schtasks")
-            .args(["/create", "/tn", task_name, "/xml", "-", "/f"])
+        let mut cmd = Command::new("schtasks");
+        cmd.args(["/create", "/tn", task_name, "/xml", "-", "/f"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+            .stderr(std::process::Stdio::piped());
+        
+        // 在Windows上隐藏命令行窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        let output = cmd.spawn()
             .map_err(|e| format!("启动schtasks命令失败: {}", e))?;
         
         if let Some(mut stdin) = output.stdin.as_ref() {
@@ -210,9 +218,17 @@ fn set_admin_startup(enabled: bool) -> Result<(), String> {
         }
     } else {
         // 删除计划任务
-        let output = Command::new("schtasks")
-            .args(["/delete", "/tn", task_name, "/f"])
-            .output()
+        let mut cmd = Command::new("schtasks");
+        cmd.args(["/delete", "/tn", task_name, "/f"]);
+        
+        // 在Windows上隐藏命令行窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        let output = cmd.output()
             .map_err(|e| format!("删除计划任务失败: {}", e))?;
         
         // 忽略任务不存在的错误
@@ -232,9 +248,17 @@ fn set_admin_startup(enabled: bool) -> Result<(), String> {
 fn check_admin_startup() -> Result<bool, String> {
     let task_name = "EasiStartup_AdminTask";
     
-    let output = Command::new("schtasks")
-        .args(["/query", "/tn", task_name])
-        .output()
+    let mut cmd = Command::new("schtasks");
+    cmd.args(["/query", "/tn", task_name]);
+    
+    // 在Windows上隐藏命令行窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output()
         .map_err(|e| format!("查询计划任务失败: {}", e))?;
     
     Ok(output.status.success())
@@ -242,9 +266,17 @@ fn check_admin_startup() -> Result<bool, String> {
 
 // 检查是否以管理员身份运行
 fn is_running_as_admin() -> Result<bool, String> {
-    let output = Command::new("powershell")
-        .args(["-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')"])
-        .output()
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')"]);
+    
+    // 在Windows上隐藏命令行窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output()
         .map_err(|e| format!("检查管理员权限失败: {}", e))?;
     
     let output_str = String::from_utf8_lossy(&output.stdout);
@@ -256,13 +288,21 @@ fn is_running_as_admin() -> Result<bool, String> {
 fn restart_as_admin() -> Result<(), String> {
     let exe_path = get_current_exe_path()?;
     
-    let output = Command::new("powershell")
-        .args([
-            "-ExecutionPolicy", "Bypass",
-            "-Command",
-            &format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", exe_path.replace("'", "''"))
-        ])
-        .output()
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        &format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", exe_path.replace("'", "''"))
+    ]);
+    
+    // 在Windows上隐藏命令行窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output()
         .map_err(|e| format!("以管理员身份重启失败: {}", e))?;
     
     if !output.status.success() {
@@ -532,9 +572,17 @@ async fn get_shortcut_info(executable_path: String) -> Result<Option<(String, St
         executable_path.replace("'", "''")
     );
     
-    let output = Command::new("powershell")
-        .args(["-Command", &powershell_script])
-        .output()
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-Command", &powershell_script]);
+    
+    // 在Windows上隐藏命令行窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output()
         .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
     
     let output_str = String::from_utf8_lossy(&output.stdout);
@@ -583,6 +631,14 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                         item.arguments.replace("'", "''").replace(",", "','"))
                 };
                 admin_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &powershell_command]);
+                
+                // 在Windows上隐藏命令行窗口
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    admin_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
                 admin_cmd
             } else {
                 // 普通运行
@@ -592,6 +648,14 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                     let args: Vec<&str> = item.arguments.split_whitespace().collect();
                     normal_cmd.args(args);
                 }
+                
+                // 在Windows上隐藏命令行窗口
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    normal_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
                 normal_cmd
             };
 
@@ -612,11 +676,27 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                     &format!("Start-Process powershell -ArgumentList @('-ExecutionPolicy', 'Bypass', '-Command', '{}') -Verb RunAs -ErrorAction Stop", 
                         item.command.replace("'", "''"))
                 ]);
+                
+                // 在Windows上隐藏命令行窗口
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    admin_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
                 admin_cmd
             } else {
                 // 普通运行命令
                 let mut normal_cmd = Command::new("powershell");
                 normal_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &item.command]);
+                
+                // 在Windows上隐藏命令行窗口
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    normal_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
                 normal_cmd
             };
 
@@ -710,9 +790,17 @@ async fn get_executable_icon(app: AppHandle, executable_path: String) -> Result<
         icon_path.to_string_lossy().replace("'", "''")
     );
     
-    let output = Command::new("powershell")
-        .args(["-Command", &powershell_script])
-        .output()
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-Command", &powershell_script]);
+    
+    // 在Windows上隐藏命令行窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output()
         .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
     
     let output_str = String::from_utf8_lossy(&output.stdout);
