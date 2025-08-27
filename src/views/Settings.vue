@@ -37,6 +37,17 @@
                       @change="updateExitAfterStartup"
                       class="mb-3"
                     ></v-switch>
+                    
+                    <v-btn
+                      variant="outlined"
+                      color="warning"
+                      size="small"
+                      @click="restartAsAdmin"
+                      class="mt-3"
+                    >
+                      <v-icon start>mdi-restart</v-icon>
+                      以管理员权限重启
+                    </v-btn>
                   </v-col>
                 </v-row>
                 
@@ -227,6 +238,16 @@ const openGitHub = async () => {
     await openUrl('https://github.com/Xwei1645/EasiStartup');
   } catch (error) {
     console.error('打开GitHub页面失败:', error);
+  }
+};
+
+// 以管理员权限重启应用
+const restartAsAdmin = async () => {
+  try {
+    await invoke('request_admin_restart');
+  } catch (error) {
+    console.error('以管理员权限重启失败:', error);
+    // 可以在这里添加用户友好的错误提示
   }
 };
 
