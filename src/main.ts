@@ -1,5 +1,4 @@
 import { createApp } from "vue";
-import { createRouter, createWebHistory } from "vue-router";
 import { createVuetify } from "vuetify";
 import * as components from "vuetify/components";
 import * as directives from "vuetify/directives";
@@ -7,7 +6,7 @@ import "vuetify/styles";
 import "@mdi/font/css/materialdesignicons.css";
 
 import App from "./App.vue";
-import router from "./router";
+import router from "./router/index";
 
 const vuetify = createVuetify({
   components,
