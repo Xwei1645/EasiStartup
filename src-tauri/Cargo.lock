@@ -898,6 +898,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-opener",
  "uuid",
+ "winapi",
  "winreg 0.55.0",
 ]
 

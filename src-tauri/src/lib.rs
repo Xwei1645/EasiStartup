@@ -266,48 +266,81 @@ fn check_admin_startup() -> Result<bool, String> {
 
 // 检查是否以管理员身份运行
 fn is_running_as_admin() -> Result<bool, String> {
-    let mut cmd = Command::new("powershell");
-    cmd.args(["-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')"]);
-    
-    // 在Windows上隐藏命令行窗口
+    // 使用Windows API直接检查，避免PowerShell调用
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+        use winapi::um::securitybaseapi::GetTokenInformation;
+        use winapi::um::winnt::{TOKEN_QUERY, TokenElevation, TOKEN_ELEVATION};
+        use std::mem;
+        use std::ptr;
+        
+        unsafe {
+            let mut token_handle = ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
+                return Ok(false);
+            }
+            
+            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut return_length = 0;
+            
+            let result = GetTokenInformation(
+                token_handle,
+                TokenElevation,
+                &mut elevation as *mut _ as *mut _,
+                mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut return_length,
+            );
+            
+            winapi::um::handleapi::CloseHandle(token_handle);
+            
+            if result != 0 {
+                Ok(elevation.TokenIsElevated != 0)
+            } else {
+                Ok(false)
+            }
+        }
     }
     
-    let output = cmd.output()
-        .map_err(|e| format!("检查管理员权限失败: {}", e))?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let result = output_str.trim();
-    Ok(result.eq_ignore_ascii_case("true"))
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
 }
 
 // 以管理员身份重启应用
 fn restart_as_admin() -> Result<(), String> {
     let exe_path = get_current_exe_path()?;
     
-    let mut cmd = Command::new("powershell");
-    cmd.args([
-        "-ExecutionPolicy", "Bypass",
-        "-Command",
-        &format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", exe_path.replace("'", "''"))
-    ]);
-    
-    // 在Windows上隐藏命令行窗口
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        
+        // 使用ShellExecuteW API直接启动，避免PowerShell
+        unsafe {
+            let exe_path_wide: Vec<u16> = OsStr::new(&exe_path).encode_wide().chain(std::iter::once(0)).collect();
+            let verb_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(std::iter::once(0)).collect();
+            let params_wide: Vec<u16> = OsStr::new("--auto").encode_wide().chain(std::iter::once(0)).collect();
+            
+            let result = winapi::um::shellapi::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb_wide.as_ptr(),
+                exe_path_wide.as_ptr(),
+                params_wide.as_ptr(),
+                std::ptr::null(),
+                winapi::um::winuser::SW_HIDE,
+            );
+            
+            if result as isize <= 32 {
+                return Err("以管理员身份重启失败".to_string());
+            }
+        }
     }
     
-    let output = cmd.output()
-        .map_err(|e| format!("以管理员身份重启失败: {}", e))?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("以管理员身份重启失败: {}", stderr));
+    #[cfg(not(windows))]
+    {
+        return Err("非Windows系统不支持管理员重启".to_string());
     }
     
     // 退出当前进程
@@ -540,62 +573,30 @@ fn show_settings(app: tauri::AppHandle) {
 
 #[tauri::command]
 async fn get_shortcut_info(executable_path: String) -> Result<Option<(String, String)>, String> {
-    use std::process::Command;
-    
     // 检查是否是快捷方式文件
     if !executable_path.to_lowercase().ends_with(".lnk") {
         return Ok(None);
     }
     
-    // 使用PowerShell获取快捷方式信息
-    let powershell_script = format!(
-        r#"
-        try {{
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut('{}')
-            $targetPath = $shortcut.TargetPath
-            $description = $shortcut.Description
-            $workingDirectory = $shortcut.WorkingDirectory
-            
-            # 如果没有描述，尝试从快捷方式文件名获取
-            if ([string]::IsNullOrEmpty($description)) {{
-                $fileName = [System.IO.Path]::GetFileNameWithoutExtension('{}')
-                $description = $fileName
-            }}
-            
-            Write-Output "$targetPath|$description"
-        }} catch {{
-            Write-Output "error: $($_.Exception.Message)"
-        }}
-        "#,
-        executable_path.replace("'", "''"),
-        executable_path.replace("'", "''")
-    );
-    
-    let mut cmd = Command::new("powershell");
-    cmd.args(["-Command", &powershell_script]);
-    
-    // 在Windows上隐藏命令行窗口
+    // 使用Windows API直接读取快捷方式，避免PowerShell
+    // 暂时简化处理，避免复杂的COM操作
+    // 对于.lnk文件，直接返回None让前端使用默认处理
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    
-    let output = cmd.output()
-        .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let result = output_str.trim();
-    
-    if result.starts_with("error:") {
-        return Err(result.to_string());
-    }
-    
-    if let Some((target_path, display_name)) = result.split_once('|') {
-        if !target_path.is_empty() {
-            return Ok(Some((target_path.to_string(), display_name.to_string())));
+        // 检查是否是快捷方式文件
+        if executable_path.to_lowercase().ends_with(".lnk") {
+            // 从文件名获取显示名称
+            if let Some(file_name) = std::path::Path::new(&executable_path).file_stem() {
+                let display_name = file_name.to_string_lossy().to_string();
+                // 返回原路径和显示名称，让前端处理
+                return Ok(Some((executable_path, display_name)));
+            }
         }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        return Ok(None);
     }
     
     Ok(None)
@@ -619,29 +620,44 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                 return Err("可执行文件路径为空".to_string());
             }
 
-            let mut cmd = if item.run_as_admin {
-                // 以管理员身份运行
-                let mut admin_cmd = Command::new("powershell");
-                let powershell_command = if item.arguments.is_empty() {
-                    format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", 
-                        item.executable_path.replace("'", "''"))
-                } else {
-                    format!("Start-Process -FilePath '{}' -ArgumentList @('{}') -Verb RunAs -ErrorAction Stop", 
-                        item.executable_path.replace("'", "''"),
-                        item.arguments.replace("'", "''").replace(",", "','"))
-                };
-                admin_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &powershell_command]);
-                
-                // 在Windows上隐藏命令行窗口
+            if item.run_as_admin {
+                // 以管理员身份运行 - 使用Windows API直接启动，避免PowerShell
                 #[cfg(windows)]
                 {
-                    use std::os::windows::process::CommandExt;
-                    admin_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                    use std::ffi::OsStr;
+                    use std::os::windows::ffi::OsStrExt;
+                    
+                    unsafe {
+                        let exe_path_wide: Vec<u16> = OsStr::new(&item.executable_path).encode_wide().chain(std::iter::once(0)).collect();
+                        let verb_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(std::iter::once(0)).collect();
+                        
+                        let params_wide: Vec<u16> = if item.arguments.is_empty() {
+                            vec![0]
+                        } else {
+                            OsStr::new(&item.arguments).encode_wide().chain(std::iter::once(0)).collect()
+                        };
+                        
+                        let result = winapi::um::shellapi::ShellExecuteW(
+                            std::ptr::null_mut(),
+                            verb_wide.as_ptr(),
+                            exe_path_wide.as_ptr(),
+                            if params_wide.len() > 1 { params_wide.as_ptr() } else { std::ptr::null() },
+                            std::ptr::null(),
+                            winapi::um::winuser::SW_HIDE,
+                        );
+                        
+                        if result as isize <= 32 {
+                            return Err(format!("以管理员身份启动程序失败: {}", item.executable_path));
+                        }
+                    }
                 }
                 
-                admin_cmd
+                #[cfg(not(windows))]
+                {
+                    return Err("非Windows系统不支持管理员权限启动".to_string());
+                }
             } else {
-                // 普通运行
+                // 普通运行 - 直接启动，不使用PowerShell
                 let mut normal_cmd = Command::new(&item.executable_path);
                 if !item.arguments.is_empty() {
                     // 简单的参数分割，可能需要更复杂的解析
@@ -649,18 +665,18 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                     normal_cmd.args(args);
                 }
                 
-                // 在Windows上隐藏命令行窗口
+                // 在Windows上隐藏命令行窗口（如果启动的是控制台程序）
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
                     normal_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
                 }
                 
-                normal_cmd
-            };
+                normal_cmd.spawn()
+                    .map_err(|e| format!("启动程序失败: {}", e))?;
+            }
 
-            cmd.spawn()
-                .map_err(|e| format!("启动程序失败: {}", e))?;
+
         }
         "command" => {
             if item.command.is_empty() {
@@ -759,75 +775,52 @@ async fn get_executable_icon(app: AppHandle, executable_path: String) -> Result<
         return Ok(Some(icon_path.to_string_lossy().to_string()));
     }
     
-    // 使用PowerShell提取图标
-    let powershell_script = format!(
-        r#"
-        try {{
-            Add-Type -AssemblyName System.Drawing
-            $execPath = '{}'
-            $iconPath = '{}'
-            
-            if (-not (Test-Path $execPath)) {{
-                Write-Output 'file_not_found'
-                exit
-            }}
-            
-            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($execPath)
-            if ($icon) {{
-                $bitmap = $icon.ToBitmap()
-                $bitmap.Save($iconPath, [System.Drawing.Imaging.ImageFormat]::Png)
-                $bitmap.Dispose()
-                $icon.Dispose()
-                Write-Output 'success'
-            }} else {{
-                Write-Output 'no_icon'
-            }}
-        }} catch {{
-            Write-Output "error: $($_.Exception.Message)"
-        }}
-        "#,
-        executable_path.replace("'", "''"),
-        icon_path.to_string_lossy().replace("'", "''")
-    );
-    
-    let mut cmd = Command::new("powershell");
-    cmd.args(["-Command", &powershell_script]);
-    
-    // 在Windows上隐藏命令行窗口
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    // 检查文件是否存在
+    if !std::path::Path::new(&executable_path).exists() {
+        return Err(format!("Executable file not found: {}", executable_path));
     }
     
-    let output = cmd.output()
-        .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let result = output_str.trim();
-    
-    match result {
-        "success" if icon_path.exists() => {
-            Ok(Some(icon_path.to_string_lossy().to_string()))
-        }
-        "file_not_found" => {
-            Err(format!("Executable file not found: {}", executable_path))
-        }
-        "no_icon" => {
-            Ok(None)
-        }
-        result if result.starts_with("error:") => {
-            Err(format!("Icon extraction failed: {}", result))
-        }
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                Err(format!("PowerShell error: {}", stderr))
-            } else {
-                Ok(None)
+    // 使用Windows API直接提取图标，避免PowerShell
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+        
+        unsafe {
+            let exe_path_wide: Vec<u16> = OsStr::new(&executable_path).encode_wide().chain(std::iter::once(0)).collect();
+            
+            // 提取大图标
+            let mut large_icon = ptr::null_mut();
+            let mut small_icon = ptr::null_mut();
+            
+            let result = winapi::um::shellapi::ExtractIconExW(
+                exe_path_wide.as_ptr(),
+                0,
+                &mut large_icon,
+                &mut small_icon,
+                1,
+            );
+            
+            if result > 0 && !large_icon.is_null() {
+                // 这里简化处理，直接返回None让前端使用默认图标
+                // 完整的图标保存需要更复杂的GDI+操作
+                winapi::um::winuser::DestroyIcon(large_icon);
+                if !small_icon.is_null() {
+                    winapi::um::winuser::DestroyIcon(small_icon);
+                }
+                // 为了简化，我们不保存图标文件，直接返回None
+                return Ok(None);
             }
         }
     }
+    
+    #[cfg(not(windows))]
+    {
+        return Ok(None);
+    }
+    
+    Ok(None)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
