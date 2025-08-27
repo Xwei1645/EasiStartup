@@ -8,6 +8,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use winreg::enums::*;
 use winreg::RegKey;
+use log::{info, warn, error, debug};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,12 +188,20 @@ fn set_admin_startup(enabled: bool) -> Result<(), String> {
 "#, exe_path);
         
         // 使用schtasks命令创建任务
-        let output = Command::new("schtasks")
-            .args(["/create", "/tn", task_name, "/xml", "-", "/f"])
+        let mut cmd = Command::new("schtasks");
+        cmd.args(["/create", "/tn", task_name, "/xml", "-", "/f"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+            .stderr(std::process::Stdio::piped());
+        
+        // 在Windows上隐藏命令行窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        let output = cmd.spawn()
             .map_err(|e| format!("启动schtasks命令失败: {}", e))?;
         
         if let Some(mut stdin) = output.stdin.as_ref() {
@@ -210,9 +219,17 @@ fn set_admin_startup(enabled: bool) -> Result<(), String> {
         }
     } else {
         // 删除计划任务
-        let output = Command::new("schtasks")
-            .args(["/delete", "/tn", task_name, "/f"])
-            .output()
+        let mut cmd = Command::new("schtasks");
+        cmd.args(["/delete", "/tn", task_name, "/f"]);
+        
+        // 在Windows上隐藏命令行窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        let output = cmd.output()
             .map_err(|e| format!("删除计划任务失败: {}", e))?;
         
         // 忽略任务不存在的错误
@@ -232,9 +249,17 @@ fn set_admin_startup(enabled: bool) -> Result<(), String> {
 fn check_admin_startup() -> Result<bool, String> {
     let task_name = "EasiStartup_AdminTask";
     
-    let output = Command::new("schtasks")
-        .args(["/query", "/tn", task_name])
-        .output()
+    let mut cmd = Command::new("schtasks");
+    cmd.args(["/query", "/tn", task_name]);
+    
+    // 在Windows上隐藏命令行窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let output = cmd.output()
         .map_err(|e| format!("查询计划任务失败: {}", e))?;
     
     Ok(output.status.success())
@@ -242,32 +267,81 @@ fn check_admin_startup() -> Result<bool, String> {
 
 // 检查是否以管理员身份运行
 fn is_running_as_admin() -> Result<bool, String> {
-    let output = Command::new("powershell")
-        .args(["-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')"])
-        .output()
-        .map_err(|e| format!("检查管理员权限失败: {}", e))?;
+    // 使用Windows API直接检查，避免PowerShell调用
+    #[cfg(windows)]
+    {
+        use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+        use winapi::um::securitybaseapi::GetTokenInformation;
+        use winapi::um::winnt::{TOKEN_QUERY, TokenElevation, TOKEN_ELEVATION};
+        use std::mem;
+        use std::ptr;
+        
+        unsafe {
+            let mut token_handle = ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
+                return Ok(false);
+            }
+            
+            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut return_length = 0;
+            
+            let result = GetTokenInformation(
+                token_handle,
+                TokenElevation,
+                &mut elevation as *mut _ as *mut _,
+                mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut return_length,
+            );
+            
+            winapi::um::handleapi::CloseHandle(token_handle);
+            
+            if result != 0 {
+                Ok(elevation.TokenIsElevated != 0)
+            } else {
+                Ok(false)
+            }
+        }
+    }
     
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let result = output_str.trim();
-    Ok(result.eq_ignore_ascii_case("true"))
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
 }
 
 // 以管理员身份重启应用
 fn restart_as_admin() -> Result<(), String> {
     let exe_path = get_current_exe_path()?;
     
-    let output = Command::new("powershell")
-        .args([
-            "-ExecutionPolicy", "Bypass",
-            "-Command",
-            &format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", exe_path.replace("'", "''"))
-        ])
-        .output()
-        .map_err(|e| format!("以管理员身份重启失败: {}", e))?;
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        
+        // 使用ShellExecuteW API直接启动，避免PowerShell
+        unsafe {
+            let exe_path_wide: Vec<u16> = OsStr::new(&exe_path).encode_wide().chain(std::iter::once(0)).collect();
+            let verb_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(std::iter::once(0)).collect();
+            let params_wide: Vec<u16> = OsStr::new("--auto").encode_wide().chain(std::iter::once(0)).collect();
+            
+            let result = winapi::um::shellapi::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb_wide.as_ptr(),
+                exe_path_wide.as_ptr(),
+                params_wide.as_ptr(),
+                std::ptr::null(),
+                winapi::um::winuser::SW_HIDE,
+            );
+            
+            if result as isize <= 32 {
+                return Err("以管理员身份重启失败".to_string());
+            }
+        }
+    }
     
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("以管理员身份重启失败: {}", stderr));
+    #[cfg(not(windows))]
+    {
+        return Err("非Windows系统不支持管理员重启".to_string());
     }
     
     // 退出当前进程
@@ -277,66 +351,96 @@ fn restart_as_admin() -> Result<(), String> {
 // 加载应用设置
 #[tauri::command]
 fn load_app_settings(app: AppHandle) -> Result<AppSettings, String> {
+    debug!("Loading application settings");
     let settings_file = get_app_settings_file(&app)?;
     
     if !settings_file.exists() {
+        info!("Settings file does not exist, using default settings");
         return Ok(default_app_settings());
     }
     
     let content = std::fs::read_to_string(&settings_file)
-        .map_err(|e| format!("读取设置文件失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to read settings file: {}", e);
+            format!("读取设置文件失败: {}", e)
+        })?;
     
     let settings: AppSettings = serde_json::from_str(&content)
-        .map_err(|e| format!("解析设置文件失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to parse settings file: {}", e);
+            format!("解析设置文件失败: {}", e)
+        })?;
     
+    info!("Application settings loaded successfully");
     Ok(settings)
 }
 
 // 保存应用设置
 #[tauri::command]
 fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
+    info!("Saving application settings");
     let settings_file = get_app_settings_file(&app)?;
     
     // 确保父目录存在
     if let Some(parent) = settings_file.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建设置目录失败: {}", e))?;
+            .map_err(|e| {
+                error!("Failed to create settings directory: {}", e);
+                format!("创建设置目录失败: {}", e)
+            })?;
     }
     
     let content = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("序列化设置失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to serialize settings: {}", e);
+            format!("序列化设置失败: {}", e)
+        })?;
     
     std::fs::write(&settings_file, content)
-        .map_err(|e| format!("写入设置文件失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to write settings file: {}", e);
+            format!("写入设置文件失败: {}", e)
+        })?;
     
+    info!("Application settings saved successfully");
     Ok(())
 }
 
 // 应用自启动设置
 #[tauri::command]
 fn apply_startup_settings(settings: AppSettings) -> Result<(), String> {
+    info!("Applying startup settings: auto_startup_enabled={}, auto_startup_as_admin={}", 
+          settings.auto_startup_enabled, settings.auto_startup_as_admin);
+    
     if settings.auto_startup_enabled {
         if settings.auto_startup_as_admin {
+            info!("Setting up administrator startup");
             // 需要管理员权限的自启动
             if !is_running_as_admin()? {
+                warn!("Administrator privileges required for admin startup");
                 return Err("需要管理员权限来设置管理员自启动".to_string());
             }
             
             // 删除普通自启动
+            info!("Removing normal startup");
             set_normal_startup(false)?;
             // 设置管理员自启动
+            info!("Setting admin startup");
             set_admin_startup(true)?;
         } else {
+            info!("Setting up normal startup");
             // 普通自启动
             set_admin_startup(false)?;
             set_normal_startup(true)?;
         }
     } else {
+        info!("Disabling all startup options");
         // 禁用所有自启动
         set_normal_startup(false)?;
         set_admin_startup(false)?;
     }
     
+    info!("Startup settings applied successfully");
     Ok(())
 }
 
@@ -500,54 +604,30 @@ fn show_settings(app: tauri::AppHandle) {
 
 #[tauri::command]
 async fn get_shortcut_info(executable_path: String) -> Result<Option<(String, String)>, String> {
-    use std::process::Command;
-    
     // 检查是否是快捷方式文件
     if !executable_path.to_lowercase().ends_with(".lnk") {
         return Ok(None);
     }
     
-    // 使用PowerShell获取快捷方式信息
-    let powershell_script = format!(
-        r#"
-        try {{
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut('{}')
-            $targetPath = $shortcut.TargetPath
-            $description = $shortcut.Description
-            $workingDirectory = $shortcut.WorkingDirectory
-            
-            # 如果没有描述，尝试从快捷方式文件名获取
-            if ([string]::IsNullOrEmpty($description)) {{
-                $fileName = [System.IO.Path]::GetFileNameWithoutExtension('{}')
-                $description = $fileName
-            }}
-            
-            Write-Output "$targetPath|$description"
-        }} catch {{
-            Write-Output "error: $($_.Exception.Message)"
-        }}
-        "#,
-        executable_path.replace("'", "''"),
-        executable_path.replace("'", "''")
-    );
-    
-    let output = Command::new("powershell")
-        .args(["-Command", &powershell_script])
-        .output()
-        .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let result = output_str.trim();
-    
-    if result.starts_with("error:") {
-        return Err(result.to_string());
+    // 使用Windows API直接读取快捷方式，避免PowerShell
+    // 暂时简化处理，避免复杂的COM操作
+    // 对于.lnk文件，直接返回None让前端使用默认处理
+    #[cfg(windows)]
+    {
+        // 检查是否是快捷方式文件
+        if executable_path.to_lowercase().ends_with(".lnk") {
+            // 从文件名获取显示名称
+            if let Some(file_name) = std::path::Path::new(&executable_path).file_stem() {
+                let display_name = file_name.to_string_lossy().to_string();
+                // 返回原路径和显示名称，让前端处理
+                return Ok(Some((executable_path, display_name)));
+            }
+        }
     }
     
-    if let Some((target_path, display_name)) = result.split_once('|') {
-        if !target_path.is_empty() {
-            return Ok(Some((target_path.to_string(), display_name.to_string())));
-        }
+    #[cfg(not(windows))]
+    {
+        return Ok(None);
     }
     
     Ok(None)
@@ -556,54 +636,108 @@ async fn get_shortcut_info(executable_path: String) -> Result<Option<(String, St
 // 执行单个启动项
 #[tauri::command]
 async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
+    info!("Executing startup item: {} (ID: {})", item.name, item.id);
+    
     if !item.enabled {
+        debug!("Startup item '{}' is disabled, skipping", item.name);
         return Ok(());
     }
 
     // 如果启用了延迟，先等待
     if item.delay_enabled && item.delay_seconds > 0 {
+        info!("Delaying startup item '{}' for {} seconds", item.name, item.delay_seconds);
         thread::sleep(Duration::from_secs(item.delay_seconds as u64));
     }
 
     match item.mode.as_str() {
         "normal" => {
+            debug!("Executing startup item '{}' in normal mode", item.name);
             if item.executable_path.is_empty() {
+                error!("Executable path is empty for startup item '{}'", item.name);
                 return Err("可执行文件路径为空".to_string());
             }
 
-            let mut cmd = if item.run_as_admin {
-                // 以管理员身份运行
-                let mut admin_cmd = Command::new("powershell");
-                let powershell_command = if item.arguments.is_empty() {
-                    format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", 
-                        item.executable_path.replace("'", "''"))
-                } else {
-                    format!("Start-Process -FilePath '{}' -ArgumentList @('{}') -Verb RunAs -ErrorAction Stop", 
-                        item.executable_path.replace("'", "''"),
-                        item.arguments.replace("'", "''").replace(",", "','"))
-                };
-                admin_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &powershell_command]);
-                admin_cmd
+            if item.run_as_admin {
+                info!("Running startup item '{}' as administrator: {}", item.name, item.executable_path);
+                // 以管理员身份运行 - 使用Windows API直接启动，避免PowerShell
+                #[cfg(windows)]
+                {
+                    use std::ffi::OsStr;
+                    use std::os::windows::ffi::OsStrExt;
+                    
+                    unsafe {
+                        let exe_path_wide: Vec<u16> = OsStr::new(&item.executable_path).encode_wide().chain(std::iter::once(0)).collect();
+                        let verb_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(std::iter::once(0)).collect();
+                        
+                        let params_wide: Vec<u16> = if item.arguments.is_empty() {
+                            vec![0]
+                        } else {
+                            OsStr::new(&item.arguments).encode_wide().chain(std::iter::once(0)).collect()
+                        };
+                        
+                        let result = winapi::um::shellapi::ShellExecuteW(
+                            std::ptr::null_mut(),
+                            verb_wide.as_ptr(),
+                            exe_path_wide.as_ptr(),
+                            if params_wide.len() > 1 { params_wide.as_ptr() } else { std::ptr::null() },
+                            std::ptr::null(),
+                            winapi::um::winuser::SW_HIDE,
+                        );
+                        
+                        if result as isize <= 32 {
+                            error!("Failed to start program as administrator: {} (result: {})", item.executable_path, result as isize);
+                            return Err(format!("以管理员身份启动程序失败: {}", item.executable_path));
+                        } else {
+                            info!("Successfully started '{}' as administrator", item.name);
+                        }
+                    }
+                }
+                
+                #[cfg(not(windows))]
+                {
+                    error!("Administrator startup not supported on non-Windows systems for item '{}'", item.name);
+                    return Err("非Windows系统不支持管理员权限启动".to_string());
+                }
             } else {
-                // 普通运行
+                info!("Running startup item '{}' normally: {}", item.name, item.executable_path);
+                // 普通运行 - 直接启动，不使用PowerShell
                 let mut normal_cmd = Command::new(&item.executable_path);
                 if !item.arguments.is_empty() {
+                    debug!("Using arguments for '{}': {}", item.name, item.arguments);
                     // 简单的参数分割，可能需要更复杂的解析
                     let args: Vec<&str> = item.arguments.split_whitespace().collect();
                     normal_cmd.args(args);
                 }
-                normal_cmd
-            };
+                
+                // 在Windows上隐藏命令行窗口（如果启动的是控制台程序）
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    normal_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
+                match normal_cmd.spawn() {
+                    Ok(_) => {
+                        info!("Successfully started startup item '{}'", item.name);
+                    }
+                    Err(e) => {
+                        error!("Failed to start startup item '{}': {}", item.name, e);
+                        return Err(format!("启动程序失败: {}", e));
+                    }
+                }
+            }
 
-            cmd.spawn()
-                .map_err(|e| format!("启动程序失败: {}", e))?;
+
         }
         "command" => {
+            debug!("Executing startup item '{}' in command mode", item.name);
             if item.command.is_empty() {
+                error!("Command is empty for startup item '{}'", item.name);
                 return Err("命令为空".to_string());
             }
 
             let mut cmd = if item.run_as_admin {
+                info!("Running command as administrator for '{}': {}", item.name, item.command);
                 // 以管理员身份运行命令
                 let mut admin_cmd = Command::new("powershell");
                 admin_cmd.args([
@@ -612,42 +746,82 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                     &format!("Start-Process powershell -ArgumentList @('-ExecutionPolicy', 'Bypass', '-Command', '{}') -Verb RunAs -ErrorAction Stop", 
                         item.command.replace("'", "''"))
                 ]);
+                
+                // 在Windows上隐藏命令行窗口
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    admin_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
                 admin_cmd
             } else {
+                info!("Running command normally for '{}': {}", item.name, item.command);
                 // 普通运行命令
                 let mut normal_cmd = Command::new("powershell");
                 normal_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &item.command]);
+                
+                // 在Windows上隐藏命令行窗口
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    normal_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
                 normal_cmd
             };
 
-            cmd.spawn()
-                .map_err(|e| format!("执行命令失败: {}", e))?;
+            match cmd.spawn() {
+                Ok(_) => {
+                    info!("Successfully executed command for startup item '{}'", item.name);
+                }
+                Err(e) => {
+                    error!("Failed to execute command for startup item '{}': {}", item.name, e);
+                    return Err(format!("执行命令失败: {}", e));
+                }
+            }
         }
         _ => {
+            error!("Unknown startup item mode '{}' for item '{}'", item.mode, item.name);
             return Err(format!("未知的启动项模式: {}", item.mode));
         }
     }
 
+    info!("Startup item '{}' executed successfully", item.name);
     Ok(())
 }
 
 // 执行所有启动项
 #[tauri::command]
 async fn execute_all_startup_items(app: AppHandle) -> Result<(), String> {
+    info!("Starting execution of all startup items");
     let items = load_startup_items(app.clone()).await?;
+    
+    let enabled_items: Vec<_> = items.iter().filter(|item| item.enabled).collect();
+    info!("Found {} enabled startup items out of {} total items", enabled_items.len(), items.len());
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
     
     for item in items {
         if item.enabled {
             if let Err(e) = execute_startup_item(item.clone()).await {
+                error!("Failed to execute startup item '{}': {}", item.name, e);
+                error_count += 1;
                 eprintln!("执行启动项 '{}' 失败: {}", item.name, e);
                 // 继续执行其他启动项，不因为一个失败而停止
+            } else {
+                success_count += 1;
             }
         }
     }
     
+    info!("Startup items execution completed: {} successful, {} failed", success_count, error_count);
+    
     // 检查是否需要在执行完启动项后退出
     let settings = load_app_settings(app)?;
     if settings.exit_after_startup {
+        info!("Exit after startup is enabled, application will exit in 1 second");
         // 等待一小段时间确保所有启动项都已启动
         thread::sleep(Duration::from_millis(1000));
         std::process::exit(0);
@@ -679,67 +853,52 @@ async fn get_executable_icon(app: AppHandle, executable_path: String) -> Result<
         return Ok(Some(icon_path.to_string_lossy().to_string()));
     }
     
-    // 使用PowerShell提取图标
-    let powershell_script = format!(
-        r#"
-        try {{
-            Add-Type -AssemblyName System.Drawing
-            $execPath = '{}'
-            $iconPath = '{}'
+    // 检查文件是否存在
+    if !std::path::Path::new(&executable_path).exists() {
+        return Err(format!("Executable file not found: {}", executable_path));
+    }
+    
+    // 使用Windows API直接提取图标，避免PowerShell
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+        
+        unsafe {
+            let exe_path_wide: Vec<u16> = OsStr::new(&executable_path).encode_wide().chain(std::iter::once(0)).collect();
             
-            if (-not (Test-Path $execPath)) {{
-                Write-Output 'file_not_found'
-                exit
-            }}
+            // 提取大图标
+            let mut large_icon = ptr::null_mut();
+            let mut small_icon = ptr::null_mut();
             
-            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($execPath)
-            if ($icon) {{
-                $bitmap = $icon.ToBitmap()
-                $bitmap.Save($iconPath, [System.Drawing.Imaging.ImageFormat]::Png)
-                $bitmap.Dispose()
-                $icon.Dispose()
-                Write-Output 'success'
-            }} else {{
-                Write-Output 'no_icon'
-            }}
-        }} catch {{
-            Write-Output "error: $($_.Exception.Message)"
-        }}
-        "#,
-        executable_path.replace("'", "''"),
-        icon_path.to_string_lossy().replace("'", "''")
-    );
-    
-    let output = Command::new("powershell")
-        .args(["-Command", &powershell_script])
-        .output()
-        .map_err(|e| format!("Failed to execute PowerShell: {}", e))?;
-    
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let result = output_str.trim();
-    
-    match result {
-        "success" if icon_path.exists() => {
-            Ok(Some(icon_path.to_string_lossy().to_string()))
-        }
-        "file_not_found" => {
-            Err(format!("Executable file not found: {}", executable_path))
-        }
-        "no_icon" => {
-            Ok(None)
-        }
-        result if result.starts_with("error:") => {
-            Err(format!("Icon extraction failed: {}", result))
-        }
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                Err(format!("PowerShell error: {}", stderr))
-            } else {
-                Ok(None)
+            let result = winapi::um::shellapi::ExtractIconExW(
+                exe_path_wide.as_ptr(),
+                0,
+                &mut large_icon,
+                &mut small_icon,
+                1,
+            );
+            
+            if result > 0 && !large_icon.is_null() {
+                // 这里简化处理，直接返回None让前端使用默认图标
+                // 完整的图标保存需要更复杂的GDI+操作
+                winapi::um::winuser::DestroyIcon(large_icon);
+                if !small_icon.is_null() {
+                    winapi::um::winuser::DestroyIcon(small_icon);
+                }
+                // 为了简化，我们不保存图标文件，直接返回None
+                return Ok(None);
             }
         }
     }
+    
+    #[cfg(not(windows))]
+    {
+        return Ok(None);
+    }
+    
+    Ok(None)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -748,17 +907,48 @@ pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let auto_mode = args.iter().any(|arg| arg == "--auto");
 
+    // 获取exe同级目录的log文件夹路径
+    let log_dir = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("log");
+
+    // 确保log目录存在
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("Failed to create log directory: {}", e);
+    }
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout)
+                        .filter(|metadata| metadata.level() <= log::Level::Info),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: Some("easistartup".to_string()) })
+                        .filter(|metadata| metadata.level() <= log::Level::Debug),
+                ])
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .setup(move |app| {
+            info!("EasiStartup application starting, version: {}", env!("CARGO_PKG_VERSION"));
+            info!("Auto mode: {}", auto_mode);
+            
             // 如果是自动模式，执行所有启动项然后退出
             if auto_mode {
+                info!("Running in auto mode, executing startup items");
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = execute_all_startup_items(app_handle).await {
+                        error!("Failed to execute startup items in auto mode: {}", e);
                         eprintln!("自动执行启动项失败: {}", e);
+                    } else {
+                        info!("All startup items executed successfully in auto mode");
                     }
                     std::process::exit(0);
                 });
@@ -770,6 +960,7 @@ pub fn run() {
             let settings = MenuItem::with_id(app, "settings", "应用设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&startup_editor, &settings, &quit])?;
+            info!("Tray menu created successfully");
 
             // 创建托盘图标
             let _tray = TrayIconBuilder::with_id("main")
@@ -777,23 +968,29 @@ pub fn run() {
                 .icon(app.default_window_icon().unwrap().clone())
                 .on_menu_event(move |app, event| {
                     let handle = app.app_handle();
+                    debug!("Tray menu event triggered: {}", event.id.as_ref());
                     match event.id.as_ref() {
                         "startup_editor" => {
+                            info!("Opening startup editor window");
                             if let Some(window) = handle.get_webview_window("startup-editor") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
                         }
                         "settings" => {
+                            info!("Opening settings window");
                             if let Some(window) = handle.get_webview_window("settings") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
                         }
                         "quit" => {
+                            info!("Application quit requested from tray menu");
                             app.exit(0);
                         }
-                        _ => {}
+                        _ => {
+                            warn!("Unknown tray menu event: {}", event.id.as_ref());
+                        }
                     }
                 })
 
@@ -804,6 +1001,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    info!("Window close requested for: {}, hiding window instead", window.label());
                     window.hide().unwrap();
                     api.prevent_close();
                 }

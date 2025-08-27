@@ -37,6 +37,17 @@
                       @change="updateExitAfterStartup"
                       class="mb-3"
                     ></v-switch>
+                    
+                    <v-btn
+                      variant="outlined"
+                      color="warning"
+                      size="small"
+                      @click="restartAsAdmin"
+                      class="mt-3"
+                    >
+                      <v-icon start>mdi-restart</v-icon>
+                      以管理员权限重启
+                    </v-btn>
                   </v-col>
                 </v-row>
                 
@@ -92,6 +103,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
 import StartupReminder from '../components/StartupReminder.vue';
 
 // 设置数据
@@ -108,9 +120,12 @@ const appVersion = ref('0.1.0');
 const loadSettings = async () => {
   try {
     const savedSettings = await invoke('load_app_settings') as any;
+    // 检查官方插件的自启动状态
+    const autostartEnabled = await isEnabled();
+    
     // 映射后端设置到前端设置
     settings.value = {
-      autoStart: savedSettings.auto_startup_enabled,
+      autoStart: autostartEnabled || savedSettings.auto_startup_enabled,
       runAsAdmin: savedSettings.auto_startup_as_admin,
       exitAfterStartup: savedSettings.exit_after_startup
     };
@@ -132,18 +147,29 @@ const getAppVersion = async () => {
 // 更新开机自启设置
 const updateAutoStart = async () => {
   try {
-    // 先加载当前设置
+    if (settings.value.autoStart) {
+      // 启用自启动
+      await enable();
+    } else {
+      // 禁用自启动
+      await disable();
+      // 如果禁用自启动，同时禁用管理员权限
+      settings.value.runAsAdmin = false;
+    }
+    
+    // 保存设置到本地配置
     const currentSettings = await invoke('load_app_settings') as any;
-    // 更新自启动设置
     const updatedSettings = {
       ...currentSettings,
       auto_startup_enabled: settings.value.autoStart,
       auto_startup_as_admin: settings.value.autoStart ? settings.value.runAsAdmin : false
     };
-    // 保存设置
     await invoke('save_app_settings', { settings: updatedSettings });
-    // 应用自启动设置
-    await invoke('apply_startup_settings', { settings: updatedSettings });
+    
+    // 如果需要管理员权限，仍然使用原有的任务计划程序方式
+    if (settings.value.autoStart && settings.value.runAsAdmin) {
+      await invoke('apply_startup_settings', { settings: updatedSettings });
+    }
   } catch (error) {
     console.error('更新开机自启设置失败:', error);
     // 如果失败，恢复原来的状态
@@ -168,8 +194,17 @@ const updateRunAsAdmin = async () => {
     };
     // 保存设置
     await invoke('save_app_settings', { settings: updatedSettings });
-    // 应用自启动设置
-    await invoke('apply_startup_settings', { settings: updatedSettings });
+    
+    // 如果需要管理员权限，使用任务计划程序方式
+    if (settings.value.runAsAdmin) {
+      // 先禁用官方插件的自启动
+      await disable();
+      // 然后使用任务计划程序设置管理员权限自启动
+      await invoke('apply_startup_settings', { settings: updatedSettings });
+    } else {
+      // 如果不需要管理员权限，使用官方插件
+      await enable();
+    }
   } catch (error) {
     console.error('更新管理员权限设置失败:', error);
     // 如果失败，恢复原来的状态
@@ -203,6 +238,16 @@ const openGitHub = async () => {
     await openUrl('https://github.com/Xwei1645/EasiStartup');
   } catch (error) {
     console.error('打开GitHub页面失败:', error);
+  }
+};
+
+// 以管理员权限重启应用
+const restartAsAdmin = async () => {
+  try {
+    await invoke('request_admin_restart');
+  } catch (error) {
+    console.error('以管理员权限重启失败:', error);
+    // 可以在这里添加用户友好的错误提示
   }
 };
 
