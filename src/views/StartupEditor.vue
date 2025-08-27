@@ -47,7 +47,7 @@
                         density="compact"
                         hide-details
                         class="mr-3"
-                        @update:model-value="saveItem(index)"
+                        @update:model-value="saveItem()"
                       ></v-switch>
                       <v-text-field
                         v-model="item.name"
@@ -56,7 +56,7 @@
                         hide-details
                         placeholder="未命名启动项"
                         class="title-input flex-grow-1"
-                        @blur="saveItem(index)"
+                        @blur="saveItem()"
                       ></v-text-field>
                       <v-btn
                         v-if="item.mode === 'normal'"
@@ -83,7 +83,7 @@
                       v-model="item.mode"
                       mandatory
                       class="mb-3"
-                      @update:model-value="saveItem(index)"
+                      @update:model-value="saveItem()"
                     >
                       <v-chip value="normal" variant="outlined" size="small">
                         <v-icon start size="small">mdi-application</v-icon>
@@ -128,7 +128,7 @@
                         density="compact"
                         variant="outlined"
                         class="mb-3"
-                        @blur="saveItem(index)"
+                        @blur="saveItem()"
                       ></v-text-field>
                     </div>
                     
@@ -144,7 +144,7 @@
                         density="compact"
                         variant="outlined"
                         class="mb-3"
-                        @blur="saveItem(index)"
+                        @blur="saveItem()"
                       ></v-textarea>
                     </div>
                     
@@ -163,7 +163,7 @@
                             density="compact"
                             hide-details
                             class="mb-2"
-                            @update:model-value="saveItem(index)"
+                            @update:model-value="saveItem()"
                           ></v-checkbox>
                           
                           <!-- 延迟启动 -->
@@ -175,7 +175,7 @@
                                density="compact"
                                hide-details
                                class="mr-3"
-                               @update:model-value="saveItem(index)"
+                               @update:model-value="saveItem()"
                              ></v-checkbox>
                              
                              <v-text-field
@@ -189,7 +189,7 @@
                                :min="1"
                                :max="300"
                                hide-details
-                               @blur="saveItem(index)"
+                               @blur="saveItem()"
                              ></v-text-field>
                            </div>
                         </v-expansion-panel-text>
@@ -394,7 +394,7 @@ const handleIconError = (index: number) => {
 };
 
 // 保存单个启动项
-const saveItem = async (index: number) => {
+const saveItem = async () => {
   await saveAllItems();
 };
 

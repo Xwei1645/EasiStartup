@@ -36,6 +36,7 @@ pub struct AppSettings {
     pub check_updates: bool,
     pub hide_startup_reminder: bool,
     pub hide_admin_startup_reminder: bool,
+    pub exit_after_startup: bool,
 }
 
 // 获取数据目录路径
@@ -82,6 +83,7 @@ fn default_app_settings() -> AppSettings {
         check_updates: true,
         hide_startup_reminder: false,
         hide_admin_startup_reminder: false,
+        exit_after_startup: false,
     }
 }
 
@@ -403,6 +405,12 @@ fn update_reminder_settings(app: AppHandle, hide_startup: bool, hide_admin: bool
     Ok(())
 }
 
+// 获取应用版本
+#[tauri::command]
+fn get_app_version() -> Result<String, String> {
+    Ok(env!("CARGO_PKG_VERSION").to_string())
+}
+
 #[tauri::command]
 async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -626,7 +634,7 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
 // 执行所有启动项
 #[tauri::command]
 async fn execute_all_startup_items(app: AppHandle) -> Result<(), String> {
-    let items = load_startup_items(app).await?;
+    let items = load_startup_items(app.clone()).await?;
     
     for item in items {
         if item.enabled {
@@ -635,6 +643,14 @@ async fn execute_all_startup_items(app: AppHandle) -> Result<(), String> {
                 // 继续执行其他启动项，不因为一个失败而停止
             }
         }
+    }
+    
+    // 检查是否需要在执行完启动项后退出
+    let settings = load_app_settings(app)?;
+    if settings.exit_after_startup {
+        // 等待一小段时间确保所有启动项都已启动
+        thread::sleep(Duration::from_millis(1000));
+        std::process::exit(0);
     }
     
     Ok(())
@@ -813,7 +829,8 @@ pub fn run() {
             check_normal_startup,
             check_admin_startup,
             check_startup_reminders,
-            update_reminder_settings
+            update_reminder_settings,
+            get_app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

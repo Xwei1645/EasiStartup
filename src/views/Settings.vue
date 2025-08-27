@@ -107,10 +107,13 @@ const appVersion = ref('0.1.0');
 // 加载设置
 const loadSettings = async () => {
   try {
-    // 这里将来会调用后端API获取设置
-    // const savedSettings = await invoke('get_settings');
-    // settings.value = { ...settings.value, ...savedSettings };
-    console.log('加载设置');
+    const savedSettings = await invoke('load_app_settings') as any;
+    // 映射后端设置到前端设置
+    settings.value = {
+      autoStart: savedSettings.auto_startup_enabled,
+      runAsAdmin: savedSettings.auto_startup_as_admin,
+      exitAfterStartup: savedSettings.exit_after_startup
+    };
   } catch (error) {
     console.error('加载设置失败:', error);
   }
@@ -119,10 +122,8 @@ const loadSettings = async () => {
 // 获取应用版本
 const getAppVersion = async () => {
   try {
-    // 这里将来会调用后端API获取版本号
-    // const version = await invoke('get_app_version');
-    // appVersion.value = version;
-    console.log('获取版本号');
+    const version = await invoke('get_app_version') as string;
+    appVersion.value = version;
   } catch (error) {
     console.error('获取版本号失败:', error);
   }
@@ -131,11 +132,22 @@ const getAppVersion = async () => {
 // 更新开机自启设置
 const updateAutoStart = async () => {
   try {
-    // 这里将来会调用后端API保存设置
-    // await invoke('set_auto_start', { enabled: settings.value.autoStart });
-    console.log('更新开机自启设置:', settings.value.autoStart);
+    // 先加载当前设置
+    const currentSettings = await invoke('load_app_settings') as any;
+    // 更新自启动设置
+    const updatedSettings = {
+      ...currentSettings,
+      auto_startup_enabled: settings.value.autoStart,
+      auto_startup_as_admin: settings.value.autoStart ? settings.value.runAsAdmin : false
+    };
+    // 保存设置
+    await invoke('save_app_settings', { settings: updatedSettings });
+    // 应用自启动设置
+    await invoke('apply_startup_settings', { settings: updatedSettings });
   } catch (error) {
     console.error('更新开机自启设置失败:', error);
+    // 如果失败，恢复原来的状态
+    await loadSettings();
   }
 };
 
@@ -147,29 +159,51 @@ const updateRunAsAdmin = async () => {
   }
   
   try {
-    // 这里将来会调用后端API保存设置
-    // await invoke('set_run_as_admin', { enabled: settings.value.runAsAdmin });
-    console.log('更新管理员权限设置:', settings.value.runAsAdmin);
+    // 先加载当前设置
+    const currentSettings = await invoke('load_app_settings') as any;
+    // 更新管理员权限设置
+    const updatedSettings = {
+      ...currentSettings,
+      auto_startup_as_admin: settings.value.runAsAdmin
+    };
+    // 保存设置
+    await invoke('save_app_settings', { settings: updatedSettings });
+    // 应用自启动设置
+    await invoke('apply_startup_settings', { settings: updatedSettings });
   } catch (error) {
     console.error('更新管理员权限设置失败:', error);
+    // 如果失败，恢复原来的状态
+    await loadSettings();
   }
 };
 
 // 更新执行后退出设置
 const updateExitAfterStartup = async () => {
   try {
-    // 这里将来会调用后端API保存设置
-    // await invoke('set_exit_after_startup', { enabled: settings.value.exitAfterStartup });
-    console.log('更新执行后退出设置:', settings.value.exitAfterStartup);
+    // 先加载当前设置
+    const currentSettings = await invoke('load_app_settings') as any;
+    // 更新执行后退出设置
+    const updatedSettings = {
+      ...currentSettings,
+      exit_after_startup: settings.value.exitAfterStartup
+    };
+    // 保存设置
+    await invoke('save_app_settings', { settings: updatedSettings });
   } catch (error) {
     console.error('更新执行后退出设置失败:', error);
+    // 如果失败，恢复原来的状态
+    await loadSettings();
   }
 };
 
 // 打开GitHub页面
-const openGitHub = () => {
-  // 这里将来会调用Tauri的open API
-  console.log('打开GitHub页面');
+const openGitHub = async () => {
+  try {
+    const { openUrl } = await import('@tauri-apps/plugin-opener');
+    await openUrl('https://github.com/Xwei1645/EasiStartup');
+  } catch (error) {
+    console.error('打开GitHub页面失败:', error);
+  }
 };
 
 const startupReminderRef = ref<InstanceType<typeof StartupReminder>>();
