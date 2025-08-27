@@ -85,12 +85,14 @@
         </v-row>
       </v-container>
     </v-main>
+    <StartupReminder ref="startupReminderRef" />
   </v-app>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import StartupReminder from '../components/StartupReminder.vue';
 
 // 设置数据
 const settings = ref({
@@ -170,10 +172,17 @@ const openGitHub = () => {
   console.log('打开GitHub页面');
 };
 
+const startupReminderRef = ref<InstanceType<typeof StartupReminder>>();
+
 // 组件挂载时加载数据
 onMounted(() => {
   loadSettings();
   getAppVersion();
+  
+  // 页面加载完成后检查自启动提醒
+  setTimeout(() => {
+    startupReminderRef.value?.checkReminders();
+  }, 800);
 });
 </script>
 

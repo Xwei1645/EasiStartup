@@ -105,7 +105,7 @@
                               <v-avatar size="32">
                                 <v-img
                                   v-if="item.icon"
-                                  :src="item.icon"
+                                  :src="convertToAssetUrl(item.icon)"
                                   alt="应用图标"
                                   @error="handleIconError(index)"
                                 ></v-img>
@@ -228,12 +228,15 @@
         </v-row>
       </v-container>
     </v-main>
+    <StartupReminder ref="startupReminderRef" />
   </v-app>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import StartupReminder from '../components/StartupReminder.vue';
 
 // 启动项数据类型
 interface StartupItem {
@@ -283,6 +286,17 @@ const truncatePath = (path: string, maxLength: number = 50): string => {
   }
   
   return result;
+};
+
+// 转换本地文件路径为Tauri可访问的资源URL
+const convertToAssetUrl = (filePath: string): string => {
+  if (!filePath) return '';
+  try {
+    return convertFileSrc(filePath);
+  } catch (error) {
+    console.warn('转换图标路径失败:', error);
+    return '';
+  }
 };
 
 // 添加新的启动项
@@ -437,9 +451,16 @@ const executeAllItems = async () => {
   }
 };
 
+const startupReminderRef = ref<InstanceType<typeof StartupReminder>>();
+
 // 组件挂载时加载数据
 onMounted(() => {
   loadStartupItems();
+  
+  // 页面加载完成后检查自启动提醒
+  setTimeout(() => {
+    startupReminderRef.value?.checkReminders();
+  }, 800);
 });
 </script>
 

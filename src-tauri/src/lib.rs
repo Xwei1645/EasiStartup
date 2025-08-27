@@ -6,6 +6,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
+use winreg::enums::*;
+use winreg::RegKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +24,18 @@ pub struct StartupItem {
     pub enabled: bool,
     pub delay_enabled: bool,
     pub delay_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub auto_startup_enabled: bool,
+    pub auto_startup_as_admin: bool,
+    pub minimize_to_tray: bool,
+    pub start_minimized: bool,
+    pub check_updates: bool,
+    pub hide_startup_reminder: bool,
+    pub hide_admin_startup_reminder: bool,
 }
 
 // 获取数据目录路径
@@ -50,6 +64,343 @@ fn get_data_dir(_app: &AppHandle) -> Result<PathBuf, String> {
 fn get_startup_items_file(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = get_data_dir(app)?;
     Ok(data_dir.join("startup_items.json"))
+}
+
+// 获取应用设置配置文件路径
+fn get_app_settings_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir = get_data_dir(app)?;
+    Ok(data_dir.join("app_settings.json"))
+}
+
+// 默认应用设置
+fn default_app_settings() -> AppSettings {
+    AppSettings {
+        auto_startup_enabled: false,
+        auto_startup_as_admin: false,
+        minimize_to_tray: true,
+        start_minimized: false,
+        check_updates: true,
+        hide_startup_reminder: false,
+        hide_admin_startup_reminder: false,
+    }
+}
+
+// 获取当前可执行文件路径
+fn get_current_exe_path() -> Result<String, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("获取可执行文件路径失败: {}", e))?
+        .to_string_lossy()
+        .to_string();
+    Ok(exe_path)
+}
+
+// 设置普通自启动（注册表方式）
+fn set_normal_startup(enabled: bool) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu
+        .open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_SET_VALUE | KEY_QUERY_VALUE)
+        .map_err(|e| format!("打开注册表Run键失败: {}", e))?;
+    
+    let app_name = "EasiStartup";
+    
+    if enabled {
+        let exe_path = get_current_exe_path()?;
+        let startup_command = format!("\"{}\" --auto", exe_path);
+        run_key
+            .set_value(app_name, &startup_command)
+            .map_err(|e| format!("设置注册表自启动失败: {}", e))?;
+    } else {
+        // 删除注册表项（忽略不存在的错误）
+        let _ = run_key.delete_value(app_name);
+    }
+    
+    Ok(())
+}
+
+// 检查普通自启动状态
+#[tauri::command]
+fn check_normal_startup() -> Result<bool, String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|e| format!("打开注册表Run键失败: {}", e))?;
+    
+    let app_name = "EasiStartup";
+    match run_key.get_value::<String, _>(app_name) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+// 设置管理员自启动（计划任务方式）
+fn set_admin_startup(enabled: bool) -> Result<(), String> {
+    let task_name = "EasiStartup_AdminTask";
+    
+    if enabled {
+        let exe_path = get_current_exe_path()?;
+        
+        // 创建计划任务的XML配置
+        let task_xml = format!(r#"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>EasiStartup 自启动任务</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{}</Command>
+      <Arguments>--auto</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#, exe_path);
+        
+        // 使用schtasks命令创建任务
+        let output = Command::new("schtasks")
+            .args(["/create", "/tn", task_name, "/xml", "-", "/f"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("启动schtasks命令失败: {}", e))?;
+        
+        if let Some(mut stdin) = output.stdin.as_ref() {
+            use std::io::Write;
+            stdin.write_all(task_xml.as_bytes())
+                .map_err(|e| format!("写入任务XML失败: {}", e))?;
+        }
+        
+        let result = output.wait_with_output()
+            .map_err(|e| format!("等待schtasks命令完成失败: {}", e))?;
+        
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(format!("创建计划任务失败: {}", stderr));
+        }
+    } else {
+        // 删除计划任务
+        let output = Command::new("schtasks")
+            .args(["/delete", "/tn", task_name, "/f"])
+            .output()
+            .map_err(|e| format!("删除计划任务失败: {}", e))?;
+        
+        // 忽略任务不存在的错误
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("cannot find the file") && !stderr.contains("找不到") {
+                return Err(format!("删除计划任务失败: {}", stderr));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+// 检查管理员自启动状态
+#[tauri::command]
+fn check_admin_startup() -> Result<bool, String> {
+    let task_name = "EasiStartup_AdminTask";
+    
+    let output = Command::new("schtasks")
+        .args(["/query", "/tn", task_name])
+        .output()
+        .map_err(|e| format!("查询计划任务失败: {}", e))?;
+    
+    Ok(output.status.success())
+}
+
+// 检查是否以管理员身份运行
+fn is_running_as_admin() -> Result<bool, String> {
+    let output = Command::new("powershell")
+        .args(["-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')"])
+        .output()
+        .map_err(|e| format!("检查管理员权限失败: {}", e))?;
+    
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let result = output_str.trim();
+    Ok(result.eq_ignore_ascii_case("true"))
+}
+
+// 以管理员身份重启应用
+fn restart_as_admin() -> Result<(), String> {
+    let exe_path = get_current_exe_path()?;
+    
+    let output = Command::new("powershell")
+        .args([
+            "-ExecutionPolicy", "Bypass",
+            "-Command",
+            &format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", exe_path.replace("'", "''"))
+        ])
+        .output()
+        .map_err(|e| format!("以管理员身份重启失败: {}", e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("以管理员身份重启失败: {}", stderr));
+    }
+    
+    // 退出当前进程
+    std::process::exit(0);
+}
+
+// 加载应用设置
+#[tauri::command]
+fn load_app_settings(app: AppHandle) -> Result<AppSettings, String> {
+    let settings_file = get_app_settings_file(&app)?;
+    
+    if !settings_file.exists() {
+        return Ok(default_app_settings());
+    }
+    
+    let content = std::fs::read_to_string(&settings_file)
+        .map_err(|e| format!("读取设置文件失败: {}", e))?;
+    
+    let settings: AppSettings = serde_json::from_str(&content)
+        .map_err(|e| format!("解析设置文件失败: {}", e))?;
+    
+    Ok(settings)
+}
+
+// 保存应用设置
+#[tauri::command]
+fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
+    let settings_file = get_app_settings_file(&app)?;
+    
+    // 确保父目录存在
+    if let Some(parent) = settings_file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建设置目录失败: {}", e))?;
+    }
+    
+    let content = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("序列化设置失败: {}", e))?;
+    
+    std::fs::write(&settings_file, content)
+        .map_err(|e| format!("写入设置文件失败: {}", e))?;
+    
+    Ok(())
+}
+
+// 应用自启动设置
+#[tauri::command]
+fn apply_startup_settings(settings: AppSettings) -> Result<(), String> {
+    if settings.auto_startup_enabled {
+        if settings.auto_startup_as_admin {
+            // 需要管理员权限的自启动
+            if !is_running_as_admin()? {
+                return Err("需要管理员权限来设置管理员自启动".to_string());
+            }
+            
+            // 删除普通自启动
+            set_normal_startup(false)?;
+            // 设置管理员自启动
+            set_admin_startup(true)?;
+        } else {
+            // 普通自启动
+            set_admin_startup(false)?;
+            set_normal_startup(true)?;
+        }
+    } else {
+        // 禁用所有自启动
+        set_normal_startup(false)?;
+        set_admin_startup(false)?;
+    }
+    
+    Ok(())
+}
+
+// 检查当前权限状态
+#[tauri::command]
+fn check_admin_permission() -> Result<bool, String> {
+    is_running_as_admin()
+}
+
+// 请求管理员权限重启
+#[tauri::command]
+fn request_admin_restart() -> Result<(), String> {
+    restart_as_admin()
+}
+
+// 检查启动项中是否有需要管理员权限的项目
+fn has_admin_startup_items(app: &AppHandle) -> Result<bool, String> {
+    let file_path = get_startup_items_file(app)?;
+    
+    if !file_path.exists() {
+        return Ok(false);
+    }
+    
+    let content = fs::read_to_string(&file_path)
+        .map_err(|e| format!("读取启动项文件失败: {}", e))?;
+    
+    let items: Vec<StartupItem> = serde_json::from_str(&content)
+        .map_err(|e| format!("解析启动项失败: {}", e))?;
+    
+    // 检查是否有启用的管理员启动项
+    Ok(items.iter().any(|item| item.enabled && item.run_as_admin))
+}
+
+// 检查是否需要显示自启动提醒
+#[tauri::command]
+fn check_startup_reminders(app: AppHandle) -> Result<(bool, bool), String> {
+    let settings = load_app_settings(app.clone())?;
+    
+    // 如果用户已经选择不再显示提醒，直接返回false
+    if settings.hide_startup_reminder && settings.hide_admin_startup_reminder {
+        return Ok((false, false));
+    }
+    
+    let normal_startup_enabled = check_normal_startup()?;
+    let admin_startup_enabled = check_admin_startup()?;
+    let has_admin_items = has_admin_startup_items(&app)?;
+    
+    // 检查是否需要显示普通自启动提醒
+    let show_startup_reminder = !settings.hide_startup_reminder && 
+        !normal_startup_enabled && !admin_startup_enabled;
+    
+    // 检查是否需要显示管理员自启动提醒
+    let show_admin_reminder = !settings.hide_admin_startup_reminder && 
+        has_admin_items && !admin_startup_enabled;
+    
+    Ok((show_startup_reminder, show_admin_reminder))
+}
+
+// 更新提醒设置
+#[tauri::command]
+fn update_reminder_settings(app: AppHandle, hide_startup: bool, hide_admin: bool) -> Result<(), String> {
+    let mut settings = load_app_settings(app.clone())?;
+    settings.hide_startup_reminder = hide_startup;
+    settings.hide_admin_startup_reminder = hide_admin;
+    save_app_settings(app, settings)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -216,14 +567,14 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                 // 以管理员身份运行
                 let mut admin_cmd = Command::new("powershell");
                 let powershell_command = if item.arguments.is_empty() {
-                    format!("Start-Process '{}' -Verb RunAs", 
+                    format!("Start-Process -FilePath '{}' -Verb RunAs -ErrorAction Stop", 
                         item.executable_path.replace("'", "''"))
                 } else {
-                    format!("Start-Process '{}' -ArgumentList '{}' -Verb RunAs", 
+                    format!("Start-Process -FilePath '{}' -ArgumentList @('{}') -Verb RunAs -ErrorAction Stop", 
                         item.executable_path.replace("'", "''"),
-                        item.arguments.replace("'", "''"))
+                        item.arguments.replace("'", "''").replace(",", "','"))
                 };
-                admin_cmd.args(["-Command", &powershell_command]);
+                admin_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &powershell_command]);
                 admin_cmd
             } else {
                 // 普通运行
@@ -248,15 +599,16 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                 // 以管理员身份运行命令
                 let mut admin_cmd = Command::new("powershell");
                 admin_cmd.args([
+                    "-ExecutionPolicy", "Bypass",
                     "-Command",
-                    &format!("Start-Process powershell -ArgumentList '-Command', '{}' -Verb RunAs", 
+                    &format!("Start-Process powershell -ArgumentList @('-ExecutionPolicy', 'Bypass', '-Command', '{}') -Verb RunAs -ErrorAction Stop", 
                         item.command.replace("'", "''"))
                 ]);
                 admin_cmd
             } else {
                 // 普通运行命令
                 let mut normal_cmd = Command::new("powershell");
-                normal_cmd.args(["-Command", &item.command]);
+                normal_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &item.command]);
                 normal_cmd
             };
 
@@ -452,7 +804,16 @@ pub fn run() {
             get_executable_icon,
             get_shortcut_info,
             execute_startup_item,
-            execute_all_startup_items
+            execute_all_startup_items,
+            load_app_settings,
+            save_app_settings,
+            apply_startup_settings,
+            check_admin_permission,
+            request_admin_restart,
+            check_normal_startup,
+            check_admin_startup,
+            check_startup_reminders,
+            update_reminder_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
