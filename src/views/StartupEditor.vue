@@ -115,7 +115,7 @@
                       <v-textarea
                         v-model="item.command"
                         label="命令"
-                        placeholder="输入要执行的命令，例如: notepad.exe"
+                        placeholder="输入要执行的命令"
                         :rows="Math.min(Math.max(2, Math.ceil((item.command || '').length / 50)), 8)"
                         auto-grow
                         :max-rows="8"
@@ -294,36 +294,7 @@ const loadStartupItems = async () => {
     // startupItems.value = items;
     
     // 临时模拟数据
-    startupItems.value = [
-      {
-        id: '1',
-        name: 'Notepad++',
-        mode: 'normal',
-        executablePath: 'C:\\Program Files\\Notepad++\\notepad++.exe',
-        displayName: 'Notepad++',
-        icon: '',
-        arguments: '',
-        command: '',
-        runAsAdmin: false,
-        enabled: true,
-        delayEnabled: true,
-        delaySeconds: 10,
-      },
-      {
-        id: '2',
-        name: '清理临时文件',
-        mode: 'command',
-        executablePath: '',
-        displayName: '',
-        icon: '',
-        arguments: '',
-        command: 'del /q /s %temp%\\*',
-        runAsAdmin: true,
-        enabled: false,
-        delayEnabled: false,
-        delaySeconds: 5,
-      },
-    ];
+    startupItems.value = [];
     
     console.log('加载启动项列表');
   } catch (error) {
