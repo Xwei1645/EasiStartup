@@ -4,17 +4,29 @@
       <v-container fluid class="pa-6">
         <v-row>
           <v-col cols="12">
-            <!-- 页面标题和添加按钮 -->
+            <!-- 页面标题和按钮组 -->
             <div class="d-flex justify-space-between align-center mb-6">
               <h2 class="text-h4">启动项编辑</h2>
-              <v-btn
-                color="primary"
-                variant="elevated"
-                @click="addStartupItem"
-                prepend-icon="mdi-plus"
-              >
-                添加启动项
-              </v-btn>
+              <div class="d-flex" style="gap: 12px;">
+                 <v-btn
+                   color="primary"
+                   variant="elevated"
+                   @click="executeAllItems"
+                   prepend-icon="mdi-play-circle"
+                   :disabled="startupItems.length === 0 || isExecuting"
+                   :loading="isExecuting"
+                 >
+                   全部运行
+                 </v-btn>
+                 <v-btn
+                   color="primary"
+                   variant="elevated"
+                   @click="addStartupItem"
+                   prepend-icon="mdi-plus"
+                 >
+                   添加启动项
+                 </v-btn>
+               </div>
             </div>
             
             <!-- 启动项列表 -->
@@ -86,17 +98,27 @@
                     <!-- 常规模式 -->
                     <div v-if="item.mode === 'normal'">
                       <!-- 显示文件信息 -->
-                      <div v-if="item.executablePath" class="d-flex align-center mb-3">
-                        <v-avatar size="24" class="mr-2">
-                          <v-img
-                            v-if="item.icon"
-                            :src="item.icon"
-                            alt="应用图标"
-                          ></v-img>
-                          <v-icon v-else size="small">mdi-application</v-icon>
-                        </v-avatar>
-                        <div class="text-body-2">{{ item.displayName }}</div>
-                      </div>
+                      <v-card v-if="item.executablePath" variant="outlined" class="mb-3">
+                        <v-card-text class="pa-3">
+                          <div class="d-flex">
+                            <div class="d-flex flex-column justify-space-between mr-3" style="height: 48px;">
+                              <v-avatar size="32">
+                                <v-img
+                                  v-if="item.icon"
+                                  :src="item.icon"
+                                  alt="应用图标"
+                                  @error="handleIconError(index)"
+                                ></v-img>
+                                <v-icon v-else size="small">mdi-application</v-icon>
+                              </v-avatar>
+                            </div>
+                            <div class="flex-grow-1 d-flex flex-column justify-space-between" style="height: 48px;">
+                              <div class="text-subtitle-2 font-weight-medium">{{ item.displayName }}</div>
+                              <div class="text-caption text-medium-emphasis" :title="item.executablePath">{{ truncatePath(item.executablePath || '') }}</div>
+                            </div>
+                          </div>
+                        </v-card-text>
+                      </v-card>
                       
                       <!-- 启动参数 -->
                       <v-text-field
@@ -175,7 +197,21 @@
                     </v-expansion-panels>
                   </v-card-text>
                   
-
+                  <!-- 卡片底部操作按钮 -->
+                  <v-card-actions class="pa-3 pt-0">
+                    <v-spacer></v-spacer>
+                    <v-btn
+                       color="primary"
+                       variant="outlined"
+                       size="small"
+                       @click="executeItem(index)"
+                       prepend-icon="mdi-play"
+                       :disabled="!item.enabled || (item.mode === 'normal' && !item.executablePath) || (item.mode === 'command' && !item.command) || executingItems.has(index)"
+                       :loading="executingItems.has(index)"
+                     >
+                       运行
+                     </v-btn>
+                  </v-card-actions>
                 </v-card>
               </v-col>
             </v-row>
@@ -218,50 +254,109 @@ interface StartupItem {
 // 启动项列表
 const startupItems = ref<StartupItem[]>([]);
 
-// 生成唯一ID
-const generateId = (): string => {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2);
+// 执行状态
+const isExecuting = ref(false);
+const executingItems = ref(new Set<number>());
+
+// 省略过长路径的函数
+const truncatePath = (path: string, maxLength: number = 50): string => {
+  if (!path || path.length <= maxLength) return path;
+  
+  const parts = path.split('\\');
+  if (parts.length <= 2) return path;
+  
+  let result = parts[parts.length - 1]; // 文件名
+  let currentLength = result.length;
+  
+  // 从右往左添加目录
+  for (let i = parts.length - 2; i >= 0; i--) {
+    const part = parts[i];
+    const newLength = currentLength + part.length + 1; // +1 for \\
+    
+    if (newLength > maxLength && i > 0) {
+      result = '...' + '\\' + result;
+      break;
+    }
+    
+    result = part + '\\' + result;
+    currentLength = newLength;
+  }
+  
+  return result;
 };
 
 // 添加新的启动项
-const addStartupItem = () => {
-  const newItem: StartupItem = {
-    id: generateId(),
-    name: '',
-    mode: 'normal',
-    executablePath: '',
-    displayName: '',
-    icon: '',
-    arguments: '',
-    command: '',
-    runAsAdmin: false,
-    enabled: true,
-    delayEnabled: false,
-    delaySeconds: 5,
-  };
-  
-  startupItems.value.push(newItem);
+const addStartupItem = async () => {
+  try {
+    const newItem = await invoke('create_startup_item') as StartupItem;
+    newItem.name = '';
+    startupItems.value.push(newItem);
+    await saveAllItems();
+  } catch (error) {
+    console.error('创建启动项失败:', error);
+  }
 };
 
 // 选择可执行文件
 const selectExecutable = async (index: number) => {
   try {
-    // 这里将来会调用Tauri的文件选择对话框
-    // const selected = await invoke('select_executable_file');
-    // if (selected) {
-    //   const item = startupItems.value[index];
-    //   item.executablePath = selected.path;
-    //   item.displayName = selected.name;
-    //   item.icon = selected.icon;
-    //   item.name = selected.name;
-    // }
-    
-    // 临时模拟数据
-    const item = startupItems.value[index];
-    item.executablePath = 'C:\\Program Files\\Notepad++\\notepad++.exe';
-    item.displayName = 'Notepad++';
-    item.name = 'Notepad++';
-    console.log('选择可执行文件:', item);
+    const selectedPath = await invoke('open_file_dialog') as string | null;
+    if (selectedPath) {
+      const item = startupItems.value[index];
+      let actualPath = selectedPath;
+      let displayName = '';
+      
+      // 检查是否是快捷方式
+      if (selectedPath.toLowerCase().endsWith('.lnk')) {
+        try {
+          const shortcutInfo = await invoke('get_shortcut_info', { executablePath: selectedPath }) as [string, string] | null;
+          if (shortcutInfo) {
+            const [targetPath, shortcutDisplayName] = shortcutInfo;
+            actualPath = targetPath;
+            displayName = shortcutDisplayName;
+            
+            // 如果名称为空，自动填入快捷方式的标题
+            if (!item.name) {
+              item.name = shortcutDisplayName;
+            }
+          }
+        } catch (shortcutError) {
+          console.warn('获取快捷方式信息失败:', shortcutError);
+        }
+      }
+      
+      // 如果不是快捷方式或快捷方式解析失败，从路径中提取文件名
+      if (!displayName) {
+        const fileName = actualPath.split('\\').pop() || actualPath.split('/').pop() || '';
+        displayName = fileName.replace(/\.[^/.]+$/, '');
+        
+        // 如果名称为空，自动填入文件名
+        if (!item.name) {
+          item.name = displayName;
+        }
+      }
+      
+      item.executablePath = actualPath;
+      item.displayName = displayName;
+      
+      // 获取可执行文件图标（使用实际路径）
+      try {
+        const iconPath = await invoke('get_executable_icon', { executablePath: actualPath }) as string | null;
+        if (iconPath) {
+          item.icon = iconPath;
+        } else {
+          // 图标获取失败，清空icon字段以使用默认图标
+          item.icon = '';
+        }
+      } catch (iconError) {
+        console.warn('获取图标失败:', iconError);
+        // 图标获取失败，清空icon字段以使用默认图标
+        item.icon = '';
+      }
+      
+      await saveAllItems();
+      console.log('选择可执行文件:', item);
+    }
   } catch (error) {
     console.error('选择文件失败:', error);
   }
@@ -270,17 +365,30 @@ const selectExecutable = async (index: number) => {
 
 
 // 删除启动项
-const deleteItem = (index: number) => {
+const deleteItem = async (index: number) => {
   startupItems.value.splice(index, 1);
+  await saveAllItems();
 };
 
-// 保存启动项
+// 处理图标加载错误
+const handleIconError = (index: number) => {
+  const item = startupItems.value[index];
+  if (item) {
+    console.warn('图标加载失败，使用默认图标:', item.icon);
+    item.icon = ''; // 清空图标路径，使用默认图标
+  }
+};
+
+// 保存单个启动项
 const saveItem = async (index: number) => {
+  await saveAllItems();
+};
+
+// 保存所有启动项
+const saveAllItems = async () => {
   try {
-    const item = startupItems.value[index];
-    // 这里将来会调用后端API保存启动项
-    // await invoke('save_startup_item', { item });
-    console.log('保存启动项:', item);
+    await invoke('save_startup_items', { items: startupItems.value });
+    console.log('保存启动项列表成功');
   } catch (error) {
     console.error('保存启动项失败:', error);
   }
@@ -289,16 +397,43 @@ const saveItem = async (index: number) => {
 // 加载启动项列表
 const loadStartupItems = async () => {
   try {
-    // 这里将来会调用后端API获取启动项列表
-    // const items = await invoke('get_startup_items');
-    // startupItems.value = items;
-    
-    // 临时模拟数据
-    startupItems.value = [];
-    
-    console.log('加载启动项列表');
+    const items = await invoke('load_startup_items') as StartupItem[];
+    startupItems.value = items;
+    console.log('加载启动项列表成功:', items);
   } catch (error) {
     console.error('加载启动项列表失败:', error);
+    startupItems.value = [];
+  }
+};
+
+// 执行单个启动项
+const executeItem = async (index: number) => {
+  const item = startupItems.value[index];
+  if (!item.enabled) return;
+  
+  executingItems.value.add(index);
+  
+  try {
+    await invoke('execute_startup_item', { item });
+    console.log('执行启动项成功:', item.name);
+  } catch (error) {
+    console.error('执行启动项失败:', error);
+  } finally {
+    executingItems.value.delete(index);
+  }
+};
+
+// 执行所有启动项
+const executeAllItems = async () => {
+  isExecuting.value = true;
+  
+  try {
+    await invoke('execute_all_startup_items');
+    console.log('执行所有启动项成功');
+  } catch (error) {
+    console.error('执行所有启动项失败:', error);
+  } finally {
+    isExecuting.value = false;
   }
 };
 
