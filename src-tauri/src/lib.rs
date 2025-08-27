@@ -8,6 +8,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use winreg::enums::*;
 use winreg::RegKey;
+use log::{info, warn, error, debug};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -350,66 +351,96 @@ fn restart_as_admin() -> Result<(), String> {
 // 加载应用设置
 #[tauri::command]
 fn load_app_settings(app: AppHandle) -> Result<AppSettings, String> {
+    debug!("Loading application settings");
     let settings_file = get_app_settings_file(&app)?;
     
     if !settings_file.exists() {
+        info!("Settings file does not exist, using default settings");
         return Ok(default_app_settings());
     }
     
     let content = std::fs::read_to_string(&settings_file)
-        .map_err(|e| format!("读取设置文件失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to read settings file: {}", e);
+            format!("读取设置文件失败: {}", e)
+        })?;
     
     let settings: AppSettings = serde_json::from_str(&content)
-        .map_err(|e| format!("解析设置文件失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to parse settings file: {}", e);
+            format!("解析设置文件失败: {}", e)
+        })?;
     
+    info!("Application settings loaded successfully");
     Ok(settings)
 }
 
 // 保存应用设置
 #[tauri::command]
 fn save_app_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
+    info!("Saving application settings");
     let settings_file = get_app_settings_file(&app)?;
     
     // 确保父目录存在
     if let Some(parent) = settings_file.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建设置目录失败: {}", e))?;
+            .map_err(|e| {
+                error!("Failed to create settings directory: {}", e);
+                format!("创建设置目录失败: {}", e)
+            })?;
     }
     
     let content = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("序列化设置失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to serialize settings: {}", e);
+            format!("序列化设置失败: {}", e)
+        })?;
     
     std::fs::write(&settings_file, content)
-        .map_err(|e| format!("写入设置文件失败: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to write settings file: {}", e);
+            format!("写入设置文件失败: {}", e)
+        })?;
     
+    info!("Application settings saved successfully");
     Ok(())
 }
 
 // 应用自启动设置
 #[tauri::command]
 fn apply_startup_settings(settings: AppSettings) -> Result<(), String> {
+    info!("Applying startup settings: auto_startup_enabled={}, auto_startup_as_admin={}", 
+          settings.auto_startup_enabled, settings.auto_startup_as_admin);
+    
     if settings.auto_startup_enabled {
         if settings.auto_startup_as_admin {
+            info!("Setting up administrator startup");
             // 需要管理员权限的自启动
             if !is_running_as_admin()? {
+                warn!("Administrator privileges required for admin startup");
                 return Err("需要管理员权限来设置管理员自启动".to_string());
             }
             
             // 删除普通自启动
+            info!("Removing normal startup");
             set_normal_startup(false)?;
             // 设置管理员自启动
+            info!("Setting admin startup");
             set_admin_startup(true)?;
         } else {
+            info!("Setting up normal startup");
             // 普通自启动
             set_admin_startup(false)?;
             set_normal_startup(true)?;
         }
     } else {
+        info!("Disabling all startup options");
         // 禁用所有自启动
         set_normal_startup(false)?;
         set_admin_startup(false)?;
     }
     
+    info!("Startup settings applied successfully");
     Ok(())
 }
 
@@ -605,22 +636,29 @@ async fn get_shortcut_info(executable_path: String) -> Result<Option<(String, St
 // 执行单个启动项
 #[tauri::command]
 async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
+    info!("Executing startup item: {} (ID: {})", item.name, item.id);
+    
     if !item.enabled {
+        debug!("Startup item '{}' is disabled, skipping", item.name);
         return Ok(());
     }
 
     // 如果启用了延迟，先等待
     if item.delay_enabled && item.delay_seconds > 0 {
+        info!("Delaying startup item '{}' for {} seconds", item.name, item.delay_seconds);
         thread::sleep(Duration::from_secs(item.delay_seconds as u64));
     }
 
     match item.mode.as_str() {
         "normal" => {
+            debug!("Executing startup item '{}' in normal mode", item.name);
             if item.executable_path.is_empty() {
+                error!("Executable path is empty for startup item '{}'", item.name);
                 return Err("可执行文件路径为空".to_string());
             }
 
             if item.run_as_admin {
+                info!("Running startup item '{}' as administrator: {}", item.name, item.executable_path);
                 // 以管理员身份运行 - 使用Windows API直接启动，避免PowerShell
                 #[cfg(windows)]
                 {
@@ -647,19 +685,25 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                         );
                         
                         if result as isize <= 32 {
+                            error!("Failed to start program as administrator: {} (result: {})", item.executable_path, result as isize);
                             return Err(format!("以管理员身份启动程序失败: {}", item.executable_path));
+                        } else {
+                            info!("Successfully started '{}' as administrator", item.name);
                         }
                     }
                 }
                 
                 #[cfg(not(windows))]
                 {
+                    error!("Administrator startup not supported on non-Windows systems for item '{}'", item.name);
                     return Err("非Windows系统不支持管理员权限启动".to_string());
                 }
             } else {
+                info!("Running startup item '{}' normally: {}", item.name, item.executable_path);
                 // 普通运行 - 直接启动，不使用PowerShell
                 let mut normal_cmd = Command::new(&item.executable_path);
                 if !item.arguments.is_empty() {
+                    debug!("Using arguments for '{}': {}", item.name, item.arguments);
                     // 简单的参数分割，可能需要更复杂的解析
                     let args: Vec<&str> = item.arguments.split_whitespace().collect();
                     normal_cmd.args(args);
@@ -672,18 +716,28 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                     normal_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
                 }
                 
-                normal_cmd.spawn()
-                    .map_err(|e| format!("启动程序失败: {}", e))?;
+                match normal_cmd.spawn() {
+                    Ok(_) => {
+                        info!("Successfully started startup item '{}'", item.name);
+                    }
+                    Err(e) => {
+                        error!("Failed to start startup item '{}': {}", item.name, e);
+                        return Err(format!("启动程序失败: {}", e));
+                    }
+                }
             }
 
 
         }
         "command" => {
+            debug!("Executing startup item '{}' in command mode", item.name);
             if item.command.is_empty() {
+                error!("Command is empty for startup item '{}'", item.name);
                 return Err("命令为空".to_string());
             }
 
             let mut cmd = if item.run_as_admin {
+                info!("Running command as administrator for '{}': {}", item.name, item.command);
                 // 以管理员身份运行命令
                 let mut admin_cmd = Command::new("powershell");
                 admin_cmd.args([
@@ -702,6 +756,7 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                 
                 admin_cmd
             } else {
+                info!("Running command normally for '{}': {}", item.name, item.command);
                 // 普通运行命令
                 let mut normal_cmd = Command::new("powershell");
                 normal_cmd.args(["-ExecutionPolicy", "Bypass", "-Command", &item.command]);
@@ -716,34 +771,57 @@ async fn execute_startup_item(item: StartupItem) -> Result<(), String> {
                 normal_cmd
             };
 
-            cmd.spawn()
-                .map_err(|e| format!("执行命令失败: {}", e))?;
+            match cmd.spawn() {
+                Ok(_) => {
+                    info!("Successfully executed command for startup item '{}'", item.name);
+                }
+                Err(e) => {
+                    error!("Failed to execute command for startup item '{}': {}", item.name, e);
+                    return Err(format!("执行命令失败: {}", e));
+                }
+            }
         }
         _ => {
+            error!("Unknown startup item mode '{}' for item '{}'", item.mode, item.name);
             return Err(format!("未知的启动项模式: {}", item.mode));
         }
     }
 
+    info!("Startup item '{}' executed successfully", item.name);
     Ok(())
 }
 
 // 执行所有启动项
 #[tauri::command]
 async fn execute_all_startup_items(app: AppHandle) -> Result<(), String> {
+    info!("Starting execution of all startup items");
     let items = load_startup_items(app.clone()).await?;
+    
+    let enabled_items: Vec<_> = items.iter().filter(|item| item.enabled).collect();
+    info!("Found {} enabled startup items out of {} total items", enabled_items.len(), items.len());
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
     
     for item in items {
         if item.enabled {
             if let Err(e) = execute_startup_item(item.clone()).await {
+                error!("Failed to execute startup item '{}': {}", item.name, e);
+                error_count += 1;
                 eprintln!("执行启动项 '{}' 失败: {}", item.name, e);
                 // 继续执行其他启动项，不因为一个失败而停止
+            } else {
+                success_count += 1;
             }
         }
     }
     
+    info!("Startup items execution completed: {} successful, {} failed", success_count, error_count);
+    
     // 检查是否需要在执行完启动项后退出
     let settings = load_app_settings(app)?;
     if settings.exit_after_startup {
+        info!("Exit after startup is enabled, application will exit in 1 second");
         // 等待一小段时间确保所有启动项都已启动
         thread::sleep(Duration::from_millis(1000));
         std::process::exit(0);
@@ -829,18 +907,50 @@ pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let auto_mode = args.iter().any(|arg| arg == "--auto");
 
+    // 获取exe同级目录的log文件夹路径
+    let log_dir = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("log");
+
+    // 确保log目录存在
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("Failed to create log directory: {}", e);
+    }
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: Some("easistartup".to_string()) })
+                        .filter(|metadata| metadata.level() <= log::Level::Info),
+                ])
+                .level(log::LevelFilter::Debug)
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .max_file_size(10_000_000) // 10MB
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .setup(move |app| {
+            info!("EasiStartup application starting, version: {}", env!("CARGO_PKG_VERSION"));
+            info!("Auto mode: {}", auto_mode);
+            
             // 如果是自动模式，执行所有启动项然后退出
             if auto_mode {
+                info!("Running in auto mode, executing startup items");
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = execute_all_startup_items(app_handle).await {
+                        error!("Failed to execute startup items in auto mode: {}", e);
                         eprintln!("自动执行启动项失败: {}", e);
+                    } else {
+                        info!("All startup items executed successfully in auto mode");
                     }
                     std::process::exit(0);
                 });
@@ -852,6 +962,7 @@ pub fn run() {
             let settings = MenuItem::with_id(app, "settings", "应用设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&startup_editor, &settings, &quit])?;
+            info!("Tray menu created successfully");
 
             // 创建托盘图标
             let _tray = TrayIconBuilder::with_id("main")
@@ -859,23 +970,29 @@ pub fn run() {
                 .icon(app.default_window_icon().unwrap().clone())
                 .on_menu_event(move |app, event| {
                     let handle = app.app_handle();
+                    debug!("Tray menu event triggered: {}", event.id.as_ref());
                     match event.id.as_ref() {
                         "startup_editor" => {
+                            info!("Opening startup editor window");
                             if let Some(window) = handle.get_webview_window("startup-editor") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
                         }
                         "settings" => {
+                            info!("Opening settings window");
                             if let Some(window) = handle.get_webview_window("settings") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
                         }
                         "quit" => {
+                            info!("Application quit requested from tray menu");
                             app.exit(0);
                         }
-                        _ => {}
+                        _ => {
+                            warn!("Unknown tray menu event: {}", event.id.as_ref());
+                        }
                     }
                 })
 
@@ -886,6 +1003,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    info!("Window close requested for: {}, hiding window instead", window.label());
                     window.hide().unwrap();
                     api.prevent_close();
                 }
